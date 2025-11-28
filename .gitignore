@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# Temporary files
+*.sqlite3
+*.pyc
+
+# Secrets
+.env
+*.pem
+*.key
+
+# Node / lock files (if present)
+node_modules/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Mac
+.AppleDouble
+.LSOverride
+
+# Docker
+docker-compose.override.yml

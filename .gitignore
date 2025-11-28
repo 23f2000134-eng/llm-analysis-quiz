@@ -1,43 +1,22 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# Virtualenvs
+# Python virtualenv
 .venv/
 venv/
 env/
 ENV/
-pip-wheel-metadata/
 
-# Editor / OS
-.vscode/
-.idea/
-.DS_Store
-*.log
+# typical Python ignores
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
 
-# Temporary files
-*.sqlite3
-*.pyc
-
-# Secrets
+# local env / secrets
 .env
 *.pem
 *.key
 
-# Node / lock files (if present)
-node_modules/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Mac
-.AppleDouble
-.LSOverride
-
-# Docker
-docker-compose.override.yml
+# editors
+.vscode/
+.idea/
+.DS_Store

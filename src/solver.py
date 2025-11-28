@@ -1,323 +1,272 @@
+
+
+# --- DEBUG HELPERS ADDED BY ASSISTANT ---
+import re, json, sys
+def normalize_secret(s):
+    if s is None:
+        return ""
+    s = s.strip()
+    s = re.sub(r'\s+', ' ', s)
+    return s
+
+def dbg_print(tag, value):
+    try:
+        print(f"DEBUG[{tag}]:", repr(value))
+        sys.stdout.flush()
+    except Exception:
+        pass
+# --- END DEBUG HELPERS ---
+
 import time
 import json
-import requests
-import urllib.parse
-import ipaddress
-import socket
-import base64
 import re
+import os
 import logging
+from typing import Dict, List, Optional
+from urllib.parse import urljoin, urlparse
+
 from playwright.sync_api import sync_playwright
-from .parsers.csv_parser import parse_csv_from_bytes
-from .parsers.pdf_parser import parse_pdf_text
-from .utils.google_drive import download_drive_file
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
+from src.solver_helpers import derive_answer_from_page
 
-def is_private_net(url):
-    try:
-        host = urllib.parse.urlparse(url).hostname
-        if not host:
-            return True
-        ip = socket.gethostbyname(host)
-        addr = ipaddress.ip_address(ip)
-        return addr.is_private or addr.is_loopback or addr.is_reserved or addr.is_link_local
-    except Exception:
-        return True
+logger = logging.getLogger(__name__)
 
-def find_submit_url_in_text(text):
-    # find URLs that contain 'submit' or '/submit'
-    urls = re.findall(r'https?://[^\s"\'<>]+', text)
-    for u in urls:
-        if 'submit' in u:
-            return u
-    rel = re.search(r'["\'](\/[^\s"\'<>]*submit[^\s"\'<>]*)["\']', text)
-    if rel:
-        return rel.group(1)
-    return None
 
-def decode_atob_blocks(html_text):
-    outs = []
-    for m in re.finditer(r'atob\(\s*[`\'"]([A-Za-z0-9+/=\n\r]+)[`\'"]\s*\)', html_text):
-        b64 = m.group(1)
-        try:
-            decoded = base64.b64decode(b64).decode('utf-8', errors='ignore')
-            outs.append(decoded)
-        except Exception:
-            pass
-    return outs
+# -----------------------------------------------------------------------------
+# Debug dump helper (HTML + downloads)
+# -----------------------------------------------------------------------------
+def _debug_dump_page(url: str, html: str, downloads: dict):
+    safe = (
+        url.replace("://", "_")
+        .replace("/", "_")
+        .replace("?", "_")
+        .replace("&", "_")
+        .replace("=", "_")
+    )
+    ts = int(time.time())
+    outdir = "/tmp/llm_quiz_debug"
+    os.makedirs(outdir, exist_ok=True)
 
-def extract_candidate_texts(page):
-    texts = []
-    try:
-        res = page.query_selector('#result')
-        if res:
-            t = res.inner_text().strip()
-            if t:
-                texts.append(t)
-    except Exception:
-        pass
+    # HTML
+    html_file = os.path.join(outdir, f"{safe}_{ts}.html")
+    with open(html_file, "w", encoding="utf-8", errors="ignore") as fh:
+        fh.write(html or "")
 
-    try:
-        pres = page.query_selector_all('pre')
-        for p in pres:
-            t = p.text_content().strip()
-            if t:
-                texts.append(t)
-    except Exception:
-        pass
+    # Download metadata
+    meta_file = os.path.join(outdir, f"{safe}_{ts}_downloads.json")
+    simplified = []
+    for f in downloads.get("files", []):
+        simplified.append({
+            "type": f.get("type"),
+            "url": f.get("url"),
+            "filename": f.get("filename"),
+            "bytes_len": len(f.get("bytes") or b""),
+        })
+    with open(meta_file, "w", encoding="utf-8") as fh:
+        json.dump(simplified, fh, indent=2)
 
-    try:
-        html = page.content()
-        decoded_blocks = decode_atob_blocks(html)
-        texts.extend([d for d in decoded_blocks if d])
-        for m in re.finditer(r'\{[^}]{10,}\}', html, re.DOTALL):
+    # Save audio for debugging
+    for i, f in enumerate(downloads.get("files", []) or []):
+        if f.get("type") == "audio" and f.get("bytes"):
+            fname = os.path.join(outdir, f"{safe}_{ts}_audio_{i}.wav")
             try:
-                candidate = m.group(0)
-                texts.append(candidate)
+                with open(fname, "wb") as af:
+                    af.write(f["bytes"])
             except Exception:
                 pass
-    except Exception:
-        pass
 
-    return texts
+    print("DEBUG DUMP →", outdir)
 
-def find_submit_url(page):
-    try:
-        anchors = page.query_selector_all('a')
-        for a in anchors:
-            href = a.get_attribute('href')
-            if href and 'submit' in href:
-                return page.evaluate('(el)=>el.href', a)
-    except Exception:
-        pass
 
-    try:
-        forms = page.query_selector_all('form')
-        for f in forms:
-            action = f.get_attribute('action')
-            if action and 'submit' in action:
-                return page.evaluate('(el)=>el.action', f)
-    except Exception:
-        pass
+# -----------------------------------------------------------------------------
+# Utility: determine file type from URL or content-type
+# -----------------------------------------------------------------------------
+def _detect_type(url: str, content_type: str = "") -> str:
+    url = url.lower() if url else ""
+    c = content_type.lower() if content_type else ""
 
-    texts = extract_candidate_texts(page)
-    for t in texts:
-        u = find_submit_url_in_text(t)
-        if u:
-            if u.startswith('/'):
-                return urllib.parse.urljoin(page.url, u)
-            return u
+    if url.endswith(".pdf") or "pdf" in c:
+        return "pdf"
+    if url.endswith(".csv") or "csv" in c:
+        return "csv"
+    if url.endswith(".wav") or url.endswith(".mp3") or "audio" in c:
+        return "audio"
+    return "binary"
 
-    try:
-        html = page.content()
-        u = find_submit_url_in_text(html)
-        if u:
-            if u.startswith('/'):
-                return urllib.parse.urljoin(page.url, u)
-            return u
-    except Exception:
-        pass
 
-    return None
-
-def extract_download_links(page):
-    links = []
-    try:
-        anchors = page.query_selector_all('a')
-        for a in anchors:
-            href = a.get_attribute('href')
-            if href and href.strip():
-                links.append(page.evaluate('(el)=>el.href', a))
-    except Exception:
-        pass
-    return links
-
-def extract_json_from_texts(texts):
-    for t in texts:
-        try:
-            j = json.loads(t)
-            if isinstance(j, dict):
-                return j
-        except Exception:
-            try:
-                m = re.search(r'(\{.*\})', t, re.DOTALL)
-                if m:
-                    j = json.loads(m.group(1))
-                    if isinstance(j, dict):
-                        return j
-            except Exception:
-                pass
-    return None
-
-def post_answer(submit_url, email, secret, url, answer, timeout=15):
-    logging.info(f'ABOUT TO POST to: {submit_url} with answer={str(answer)[:200]}')
-
-    body = {'email': email, 'secret': secret, 'url': url, 'answer': answer}
-    resp = requests.post(submit_url, json=body, timeout=timeout)
-    try:
-        return resp.json()
-    except Exception:
-        return {'http_status': resp.status_code, 'text': resp.text}
-
-def try_candidate_submit(page_origin, email, secret, start_url, answer, timeout=8):
-    candidates = [
-        '/submit', '/api/submit', '/answer', '/api/answer',
-        '/submit-answer', '/api/v1/submit', '/tds/submit', '/submit/', '/submit-answer/'
-    ]
-    for path in candidates:
-        url = urllib.parse.urljoin(page_origin, path)
-        logging.info(f'Trying candidate submit endpoint: {url}')
-        body = {'email': email, 'secret': secret, 'url': start_url, 'answer': answer}
-        try:
-            resp = requests.post(url, json=body, timeout=timeout)
-            if resp.status_code not in (404, 405):
-                try:
-                    return url, resp.json()
-                except Exception:
-                    return url, {'http_status': resp.status_code, 'text': resp.text}
-            else:
-                logging.info(f'Candidate {url} returned status {resp.status_code}')
-        except Exception as e:
-            logging.info(f'Candidate {url} raised {e}')
-        time.sleep(0.2)
-    return None, None
-
-def solve_one_page(page, current_url, email, secret):
-    try:
-        page.goto(current_url, wait_until='domcontentloaded', timeout=20000)
-    except Exception:
-        try:
-            page.goto(current_url, timeout=20000)
-        except Exception:
-            pass
-
-    try:
-        page.wait_for_timeout(800)
-        page.wait_for_selector('#result', timeout=3000)
-    except Exception:
-        pass
-
-    texts = extract_candidate_texts(page)
-    payload = extract_json_from_texts(texts)
-
-    answer = None
-    submit_url = None
-    if payload:
-        # Prefer explicit submit fields only. Do NOT treat generic 'url' in payload as submit target
-        submit_url = None
-        for k in ('submit', 'submit_url', 'submitUrl'):
-            if k in payload:
-                submit_url = payload.get(k)
-                break
-        # As a weak fallback only if the URL value explicitly contains 'submit' text, accept it
-        if not submit_url:
-            maybe = str(payload.get('url') or '')
-            if 'submit' in maybe.lower():
-                submit_url = maybe
-        if submit_url and isinstance(submit_url, str) and submit_url.startswith('/'):
-            submit_url = urllib.parse.urljoin(page.url, submit_url)
-        if 'answer' in payload:
-            answer = payload.get('answer')
-
-    if not submit_url:
-        submit_url = find_submit_url(page)
-
-    # If still no submit_url, try candidate endpoints on same origin
-    if not submit_url:
-        page_origin = urllib.parse.urljoin(page.url, '/')
-        cand_url, cand_resp = try_candidate_submit(page_origin, email, secret, current_url, answer or "anything")
-        if cand_url:
-            logging.info(f'Found candidate submit_url {cand_url} with response {cand_resp}')
-            submit_url = cand_url
-            _candidate_submit_response = cand_resp
-        else:
-            _candidate_submit_response = None
-    else:
-        _candidate_submit_response = None
-
-    # If no answer yet, try to find downloadable file and parse it
-    if answer is None:
-        download_links = extract_download_links(page)
-        file_link = None
-        for l in download_links:
-            if l.lower().endswith(('.pdf', '.csv', '.xlsx')) or 'drive.google.com' in l:
-                file_link = l
-                break
-        if file_link:
-            if 'drive.google.com' in file_link:
-                fid = None
-                if '/d/' in file_link:
-                    fid = file_link.split('/d/')[1].split('/')[0]
-                elif 'id=' in file_link:
-                    fid = file_link.split('id=')[1].split('&')[0]
-                if fid:
-                    tmp_path = f"/tmp/{fid}"
-                    download_drive_file(fid, tmp_path)
-                    try:
-                        with open(tmp_path, 'rb') as fh:
-                            b = fh.read()
-                        answer = parse_pdf_text(b)
-                    except Exception:
-                        answer = 'downloaded_drive_file'
-            else:
-                if is_private_net(file_link):
-                    raise Exception("Blocked private/internal URL")
-                r = requests.get(file_link, timeout=30)
-                r.raise_for_status()
-                if file_link.lower().endswith('.csv'):
-                    answer = parse_csv_from_bytes(r.content)
-                elif file_link.lower().endswith('.pdf'):
-                    answer = parse_pdf_text(r.content)
-                else:
-                    answer = len(r.content)
-
-    if answer is None:
-        combined = "\n\n".join(texts + [page.inner_text('body')[:2000]])
-        nums = re.findall(r"[-+]?[0-9]*\.?[0-9]+", combined)
-        if nums:
-            try:
-                answer = sum(float(n) for n in nums)
-            except Exception:
-                answer = combined[:500]
-        else:
-            answer = combined.strip()[:500]
-
-    if submit_url and submit_url.startswith('/'):
-        submit_url = urllib.parse.urljoin(page.url, submit_url)
-
-    return answer, submit_url
-
-def solve_quiz_sequence(start_url, email, secret, timeout_seconds=170):
-    start_time = time.time()
-    current_url = start_url
+# -----------------------------------------------------------------------------
+# Download helper using Playwright fetch()
+# -----------------------------------------------------------------------------
+def _fetch_downloads(page, base_url) -> List[dict]:
+    """Download referenced assets like PDF/CSV/audio."""
     results = []
+
+    # collect <a href="..."> links
+    links = page.query_selector_all("a")
+    hrefs = []
+    for a in links:
+        try:
+            h = a.get_attribute("href")
+            if h:
+                hrefs.append(h)
+        except:
+            pass
+
+    # normalize to absolute URLs
+    abs_urls = []
+    for h in hrefs:
+        try:
+            abs_urls.append(urljoin(base_url, h))
+        except:
+            continue
+
+    # fetch assets
+    for u in abs_urls:
+        try:
+            # skip same page / JS links
+            if u.startswith("javascript:"):
+                continue
+
+            resp = page.request.get(u, timeout=8000)
+            if resp.status != 200:
+                continue
+
+            ctype = resp.headers.get("content-type", "")
+            ftype = _detect_type(u, ctype)
+            data = resp.body()
+
+            results.append({
+                "type": ftype,
+                "url": u,
+                "filename": os.path.basename(urlparse(u).path),
+                "bytes": data,
+            })
+        except Exception:
+            continue
+
+    return results
+
+
+# -----------------------------------------------------------------------------
+# Post answer helper
+
+def _post_answer(submit_url: str, email: str, secret: str, url: str, answer, timeout=12):
+    """Post answer JSON to the target submit endpoint and return parsed JSON or error dict."""
+    import requests
+    payload = {
+        "email": email,
+        "secret": secret,
+        "url": url,
+        "answer": answer,
+    }
+    try:
+        r = requests.post(submit_url, json=payload, timeout=timeout)
+        try:
+            return r.json()
+        except Exception:
+            return {"http_status": r.status_code, "text": r.text}
+    except Exception as e:
+        return {"http_status": "exception", "text": repr(e)}
+
+
+# -----------------------------------------------------------------------------
+# Main solver
+# -----------------------------------------------------------------------------
+def solve_quiz_sequence(start_url: str, email: str, secret: str, timeout_seconds: int = 170):
+    logger.info(f"START solve_quiz_sequence for {start_url} with timeout {timeout_seconds}s")
+
+    deadline = time.time() + timeout_seconds
+    out_results = []
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=['--no-sandbox','--disable-dev-shm-usage'])
-        context = browser.new_context()
-        page = context.new_page()
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        ctx = browser.new_context()
+        page = ctx.new_page()
 
-        logging.info(f'START solve_quiz_sequence for {start_url} with timeout {timeout_seconds}s')
+        current_url = start_url
 
-        while current_url and (time.time() - start_time) < timeout_seconds:
-            logging.info(f'VISIT {current_url} at t={time.time()-start_time:.1f}s')
-            page.goto(current_url, wait_until='domcontentloaded')
-            answer, submit_url = solve_one_page(page, current_url, email, secret)
-            if not submit_url:
-                results.append({'url': current_url, 'error': 'no submit url found', 'answer_attempt': answer})
+        while time.time() < deadline and current_url:
+            logger.info(f"VISIT {current_url}")
+            try:
+                page.goto(current_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                logger.error(f"Page load error for {current_url}: {e}")
                 break
-            logging.info('POSTING answer to submit_url')
-            # if candidate response was already captured, use it
-            if '_candidate_submit_response' in locals() and locals().get('_candidate_submit_response') is not None:
-                submit_resp = locals().get('_candidate_submit_response')
-                logging.info(f'Using candidate submit response: {submit_resp}')
+
+            # page HTML
+            try:
+                html = page.content()
+            except Exception:
+                html = ""
+
+            # download assets
+            downloads = {"files": _fetch_downloads(page, current_url)}
+
+            # debug dump
+            _debug_dump_page(current_url, html, downloads)
+
+            # derive answer
+            derived = derive_answer_from_page(html, downloads)
+
+            # find submit endpoint
+            submit_url = None
+
+            # Look for /submit in HTML
+            m = re.search(r'https://[^"\'<>]+/submit\b', html)
+            if m:
+                submit_url = m.group(0)
             else:
-                submit_resp = post_answer(submit_url, email, secret, current_url, answer)
-                logging.info(f'POSTED, got response: {submit_resp}')
-            results.append({'url': current_url, 'submit_response': submit_resp})
-            time.sleep(0.5)
-            next_url = submit_resp.get('url') if isinstance(submit_resp, dict) else None
-            current_url = next_url
+                # fallback candidate
+                parsed = urlparse(current_url)
+                submit_url = f"{parsed.scheme}://{parsed.netloc}/submit"
+
+            # post answer
+            logger.info("SUBMIT to %s", submit_url)
+            resp = _post_answer(submit_url, email, secret, current_url, derived["answer"])
+
+            logger.info(f"POSTED RESPONSE: {resp}")
+
+            out_results.append({
+                "url": current_url,
+                "submit_url": submit_url,
+                "derived": derived,
+                "submit_response": resp,
+            })
+
+            # follow next URL
+            next_url = resp.get("url")
+            if next_url:
+                logger.info(f"FOLLOW NEXT URL → {next_url}")
+                current_url = next_url
+                continue
+            else:
+                break
 
         browser.close()
-    return results
+
+    return out_results
+import re
+def sum_numbers_from_csv_text(csv_text):
+    nums = []
+    for line in csv_text.splitlines():
+        line = line.strip()
+        if not line: continue
+        tok = re.sub(r'[^0-9\-]', '', line)
+        if not tok: continue
+        try:
+            nums.append(int(tok))
+        except:
+            continue
+    return nums, sum(nums)
+
+from playwright.sync_api import sync_playwright
+def extract_secret_via_playwright(scrape_url, timeout_ms=60000):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox','--disable-dev-shm-usage'])
+        page = browser.new_page()
+        page.goto(scrape_url, timeout=timeout_ms)
+        page.wait_for_selector("#question", timeout=20000)
+        text = page.locator("#question").inner_text()
+        browser.close()
+    dbg_print("secret_from_dom", text)
+    return normalize_secret(text)

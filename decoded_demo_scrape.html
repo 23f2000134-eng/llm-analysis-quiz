@@ -1,0 +1,12 @@
+Scrape <a href="/demo-scrape-data?email=$EMAIL">/demo-scrape-data?email=$EMAIL</a> (relative to this page).
+Get the secret code from this page.
+POST the secret code back to <a href="/submit">/submit</a>
+
+<pre>
+{
+  "email": "$EMAIL",
+  "secret": "your secret",
+  "url": "this page's URL",
+  "answer": "the secret code you scraped"
+}
+</pre>

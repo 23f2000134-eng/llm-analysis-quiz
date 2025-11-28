@@ -1,22 +1,25 @@
-# Python virtualenv
+# virtualenv
 .venv/
 venv/
-env/
 ENV/
+env/
 
-# typical Python ignores
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
 dist/
 build/
 
-# local env / secrets
+# local env
 .env
-*.pem
-*.key
 
-# editors
+# editor / OS
 .vscode/
 .idea/
 .DS_Store
+thumbs.db
+
+# Docker
+docker-compose.override.yml
+.env.local

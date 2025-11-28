@@ -1,3 +1,22 @@
+from flask import Flask, request, jsonify
+from src.solver import solve_quiz_sequence
+import os
+
+app = Flask(__name__)
+
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"ok": True, "service": "llm-analysis-quiz"})
+
+@app.route("/api/quiz", methods=["POST"])
+def api_quiz():
+    data = request.json or {}
+    email = data.get("email")
+    secret = data.get("secret")
+    url = data.get("url")
+
+    result = solve_quiz_sequence(url, email, secret)
+    return jsonify({"ok": True, "results": result})
 import os, time
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv

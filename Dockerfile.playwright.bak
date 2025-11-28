@@ -1,0 +1,25 @@
+# Use Playwright's official Python image (includes browsers + deps)
+FROM mcr.microsoft.com/playwright/python:1.45.0-focal
+
+# non-root user is already configured in the base image (pwuser)
+WORKDIR /app
+
+# environment
+ENV PYTHONUNBUFFERED=1
+ENV PORT=8000
+
+# Copy only requirements first for caching
+COPY requirements.txt /app/requirements.txt
+
+# Install python deps from requirements
+RUN python -m pip install --upgrade pip setuptools wheel \
+  && pip install -r /app/requirements.txt
+
+# Copy app code
+COPY . /app
+
+# Expose port
+EXPOSE 8000
+
+# Default command: run gunicorn (1 worker to keep resource use low)
+CMD ["sh", "-c", "gunicorn -w 1 -b 0.0.0.0:$PORT \"src.app:app\" --timeout 300 --log-level info"]
